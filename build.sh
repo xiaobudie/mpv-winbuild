@@ -3,20 +3,24 @@ set -x
 
 main() {
     gitdir=$(pwd)
+    clang_root=$(pwd)/clang_root
     buildroot=$(pwd)
     srcdir=$(pwd)/src_packages
+    local target=$1
+    compiler=$2
+    simple_package=$3
 
     prepare
-    if [ "$1" == "32" ]; then
-        package "32"
-    elif [ "$1" == "64" ]; then
+    if [ "$target" == "32" ]; then
+        package "32" 
+    elif [ "$target" == "64" ]; then
         package "64"
-    elif [ "$1" == "64-v3" ]; then
+    elif [ "$target" == "64-v3" ]; then
         package "64-v3"
-    elif [ "$1" == "all-64" ]; then
+    elif [ "$target" == "all-64" ]; then
         package "64"
         package "64-v3"
-    else [ "$1" == "all" ];
+    else [ "$target" == "all" ];
         package "32"
         package "64"
         package "64-v3"
@@ -47,21 +51,36 @@ build() {
     local arch=$2
     local gcc_arch=$3
     
-    cmake -DTARGET_ARCH=$arch-w64-mingw32 $gcc_arch -DALWAYS_REMOVE_BUILDFILES=ON -DSINGLE_SOURCE_LOCATION=$srcdir -G Ninja -H$gitdir -B$buildroot/build$bit
+    if [ "$compiler" == "clang" ]; then
+        clang_option=(-DCMAKE_INSTALL_PREFIX=$clang_root -DMINGW_INSTALL_PREFIX=$buildroot/build$bit/install/$arch-w64-mingw32 -DCLANG_PACKAGES_LTO=ON)
+    fi
+    cmake --fresh -DTARGET_ARCH=$arch-w64-mingw32 $gcc_arch -DCOMPILER_TOOLCHAIN=$compiler "${clang_option[@]}" $extra_option -DENABLE_CCACHE=ON -DSINGLE_SOURCE_LOCATION=$srcdir -DRUSTUP_LOCATION=$buildroot/install_rustup -G Ninja -H$gitdir -B$buildroot/build$bit
+
     ninja -C $buildroot/build$bit download || true
-    if [[ ! "$(ls -A $buildroot/build$bit/install/bin)" ]]; then
-        ninja -C $buildroot/build$bit gcc
+
+    if [ "$compiler" == "gcc" ] && [ ! -f "$buildroot/build$bit/install/bin/cross-gcc" ]; then
+        ninja -C $buildroot/build$bit gcc && rm -rf $buildroot/build$bit/toolchain
+    elif [ "$compiler" == "clang" ] && [ ! "$(ls -A $clang_root/bin/clang)" ]; then
+        ninja -C $buildroot/build$bit llvm && ninja -C $buildroot/build$bit llvm-clang
+    fi
+
+    if [[ ! "$(ls -A $buildroot/install_rustup/.cargo/bin)" ]]; then
+        ninja -C $buildroot/build$bit rustup-fullclean
+        ninja -C $buildroot/build$bit rustup
     fi
     ninja -C $buildroot/build$bit update
     ninja -C $buildroot/build$bit mpv-fullclean
+    
     ninja -C $buildroot/build$bit mpv
 
-    if [ -d $buildroot/build$bit/mpv-$arch* ] ; then
+    if [ -n "$(find $buildroot/build$bit -maxdepth 1 -type d -name "mpv*$arch*" -print -quit)" ] ; then
         echo "Successfully compiled $bit-bit. Continue"
     else
         echo "Failed compiled $bit-bit. Stop"
         exit 1
     fi
+    
+    ninja -C $buildroot/build$bit cargo-clean
 }
 
 zip() {
@@ -70,9 +89,11 @@ zip() {
     local x86_64_level=$3
 
     mv $buildroot/build$bit/mpv-* $gitdir/release
-    cd ./release/mpv-packaging-master
-    cp -r ./mpv-root/* ./$arch/d3dcompiler_43.dll ../mpv-$arch$x86_64_level*
-    cd ..
+    if [ "$simple_package" != "true" ]; then
+        cd $gitdir/release/mpv-packaging-master
+        cp -r ./mpv-root/* ./$arch/d3dcompiler_43.dll ../mpv-$arch$x86_64_level*
+    fi
+    cd $gitdir/release
     for dir in ./mpv*$arch$x86_64_level*; do
         if [ -d $dir ]; then
             7z a -m0=lzma2 -mx=9 -ms=on $dir.7z $dir/* -x!*.7z
@@ -99,11 +120,23 @@ download_mpv_package() {
 
 prepare() {
     mkdir -p ./release
-    cd ./release
-    download_mpv_package
-    cd ./mpv-packaging-master
-    7z x -y ./d3dcompiler*.7z
-    cd ../..
+    if [ "$simple_package" != "true" ]; then
+        cd ./release
+        download_mpv_package
+        cd ./mpv-packaging-master
+        7z x -y ./d3dcompiler*.7z
+        cd ../..
+    fi
 }
 
-main "$1"
+while getopts t:c:s:e: flag
+do
+    case "${flag}" in
+        t) target=${OPTARG};;
+        c) compiler=${OPTARG};;
+        s) simple_package=${OPTARG};;
+        e) extra_option=${OPTARG};;
+    esac
+done
+
+main "${target:-all-64}" "${compiler:-gcc}" "${simple_package:-false}"
